@@ -7,6 +7,8 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { Client, LocalAuth } from 'whatsapp-web.js';
 import qrcode from 'qrcode';
+import fs from 'fs';
+import path from 'path';
 
 /**
  * WhatsApp Marketing Automation Tool
@@ -32,35 +34,63 @@ const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--unhandled-rejections=strict'],
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process',
+            '--disable-gpu'
+        ],
     }
 });
 
 // QR Code Generation
 client.on('qr', (qr) => {
-    console.log("QR Received"); // ভেরিফিকেশনের জন্য কনসোল লগ
+    console.log("QR Received"); 
     qrcode.toDataURL(qr, (err, url) => {
         if (err) return console.error("QR Error:", err);
-        io.emit('qr', url); // ফ্রন্টএন্ডে QR ইমেজ পাঠানো
+        io.emit('qr', url); 
         clientStatus = 'Scan Required';
         io.emit('status', clientStatus);
     });
+});
+
+client.on('loading_screen', (percent, message) => {
+    console.log('LOADING SCREEN', percent, message);
+    clientStatus = `Loading: ${percent}%`;
+    io.emit('status', clientStatus);
+});
+
+client.on('authenticated', () => {
+    console.log('AUTHENTICATED');
+    clientStatus = 'Authenticated';
+    io.emit('status', clientStatus);
+});
+
+client.on('auth_failure', msg => {
+    console.error('AUTHENTICATION FAILURE', msg);
+    clientStatus = 'Auth Failed';
+    io.emit('status', clientStatus);
 });
 
 client.on('ready', () => {
     console.log('WhatsApp Client is Ready!');
     clientStatus = 'Connected';
     io.emit('status', clientStatus);
-    io.emit('qr', null); // QR কোড হাইড করা
+    io.emit('qr', null); 
 });
 
-client.on('disconnected', () => {
+client.on('disconnected', (reason) => {
+    console.log('Client was logged out', reason);
     clientStatus = 'Disconnected';
     io.emit('status', clientStatus);
-    client.initialize(); // পুনরায় কানেক্ট করার চেষ্টা
+    client.initialize(); 
 });
 
-client.initialize();
+client.initialize().catch(err => console.error("Initial Initialize Error:", err));
 
 // --- Automation Logic ---
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -177,6 +207,9 @@ app.get('/', (req, res) => {
                         <p>Waiting for QR...</p>
                     </div>
                     <img id="qr-img" class="hidden w-full max-w-[200px] rounded-lg border-4 border-white/10" src="" alt="QR">
+                    <button id="reset-btn" class="mt-4 text-[10px] text-gray-500 hover:text-red-500 underline transition-all">
+                        Reset Session (যদি QR না আসে)
+                    </button>
                 </div>
 
                 <div class="glass p-6 rounded-2xl">
@@ -204,6 +237,7 @@ app.get('/', (req, res) => {
         const totalCount = document.getElementById('total-count');
         const progressBar = document.getElementById('progress-bar');
         const startBtn = document.getElementById('start-btn');
+        const resetBtn = document.getElementById('reset-btn');
 
         socket.on('qr', (url) => {
             if (url) {
@@ -219,11 +253,20 @@ app.get('/', (req, res) => {
 
         socket.on('status', (status) => {
             statusText.innerText = status;
-            statusDot.className = 'w-3 h-3 rounded-full ' + (status === 'Connected' ? 'bg-green-500' : 'bg-red-500');
+            if (status === 'Connected') {
+                statusDot.className = 'w-3 h-3 rounded-full bg-green-500 shadow-[0_0_10px_#22c55e]';
+            } else if (status.includes('Loading')) {
+                statusDot.className = 'w-3 h-3 rounded-full bg-yellow-500 animate-pulse';
+            } else {
+                statusDot.className = 'w-3 h-3 rounded-full bg-red-500';
+            }
         });
 
         socket.on('state', (state) => {
             stateText.innerText = state;
+            if (state === 'Sending') stateText.className = 'text-xs uppercase wa-green font-bold animate-pulse';
+            else if (state === 'Paused') stateText.className = 'text-xs uppercase text-red-500 font-bold';
+            else stateText.className = 'text-xs uppercase text-gray-400 font-bold';
         });
 
         socket.on('update_counts', (data) => {
@@ -231,21 +274,38 @@ app.get('/', (req, res) => {
             totalCount.innerText = data.totalNumbers;
             const percent = data.totalNumbers > 0 ? (data.sentCount / data.totalNumbers) * 100 : 0;
             progressBar.style.width = percent + '%';
+            if (data.sentCount === data.totalNumbers && data.totalNumbers > 0) {
+                startBtn.disabled = false;
+                startBtn.innerText = 'Start Campaign';
+                startBtn.classList.remove('opacity-50');
+            }
         });
 
         startBtn.onclick = () => {
-            const numbers = document.getElementById('numbers').value.split(',').filter(n => n.trim() !== '');
-            const messages = document.getElementById('messages').value.split('\\n').filter(m => m.trim() !== '');
+            const numbersVal = document.getElementById('numbers').value;
+            const messagesVal = document.getElementById('messages').value;
+            
+            const numbers = numbersVal.split(',').map(n => n.trim()).filter(n => n !== '');
+            const messages = messagesVal.split('\n').map(m => m.trim()).filter(m => m !== '');
             const interval = parseInt(document.getElementById('interval').value);
             const limit = parseInt(document.getElementById('limit').value);
             const pause = parseInt(document.getElementById('pause').value);
 
-            if (numbers.length === 0 || messages.length === 0) return alert('Please enter numbers and messages');
+            if (numbers.length === 0) return alert('Please enter at least one phone number');
+            if (messages.length === 0) return alert('Please enter at least one message');
+            if (statusText.innerText !== 'Connected') return alert('Please connect WhatsApp first by scanning the QR code');
 
             socket.emit('start_campaign', { numbers, messages, interval, limit, pause });
             startBtn.disabled = true;
             startBtn.innerText = 'Campaign Running...';
             startBtn.classList.add('opacity-50');
+        };
+
+        resetBtn.onclick = () => {
+            if (confirm('আপনি কি নিশ্চিত যে আপনি সেশন রিসেট করতে চান? এটি আপনার বর্তমান লগইন মুছে ফেলবে।')) {
+                socket.emit('reset_session');
+                location.reload();
+            }
         };
     </script>
 </body>
@@ -259,6 +319,21 @@ io.on('connection', (socket) => {
     
     socket.on('start_campaign', (data) => {
         startCampaign(data.numbers, data.messages, data.interval, data.limit, data.pause);
+    });
+
+    socket.on('reset_session', async () => {
+        console.log('Resetting session...');
+        try {
+            await client.destroy();
+            const sessionPath = path.join(process.cwd(), '.wwebjs_auth');
+            if (fs.existsSync(sessionPath)) {
+                fs.rmSync(sessionPath, { recursive: true, force: true });
+            }
+            console.log('Session cleared. Restarting...');
+            process.exit(0); // সার্ভার রিস্টার্ট হবে (pm2 বা অটো-রিস্টার্ট থাকলে ভালো)
+        } catch (err) {
+            console.error('Reset Error:', err);
+        }
     });
 });
 

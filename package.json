@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "start": "tsx server.ts"
+    "start": "tsx server.ts",
+    "build": "echo 'No build step needed for tsx'",
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
     "express": "^4.21.2",
