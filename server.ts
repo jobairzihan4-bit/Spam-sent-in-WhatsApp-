@@ -5,10 +5,19 @@
 import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
-import { Client, LocalAuth } from 'whatsapp-web.js';
+import pkg from 'whatsapp-web.js';
+const { Client, LocalAuth } = pkg;
 import qrcode from 'qrcode';
 import fs from 'fs';
 import path from 'path';
+
+// Prevent server from crashing due to unhandled errors
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught Exception:', err);
+});
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
 
 /**
  * WhatsApp Marketing Automation Tool
@@ -41,11 +50,11 @@ const client = new Client({
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
             '--no-zygote',
-            '--single-process',
             '--disable-gpu'
         ],
     }
 });
+
 
 // QR Code Generation
 client.on('qr', (qr) => {
@@ -87,13 +96,12 @@ client.on('disconnected', (reason) => {
     console.log('Client was logged out', reason);
     clientStatus = 'Disconnected';
     io.emit('status', clientStatus);
-    client.initialize(); 
+    client.initialize().catch(err => console.error("Re-Initialize Error:", err)); 
 });
-
-client.initialize().catch(err => console.error("Initial Initialize Error:", err));
 
 // --- Automation Logic ---
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 
 async function startCampaign(numbers: string[], messages: string[], interval: number, limit: number, pauseDuration: number) {
     isRunning = true;
@@ -339,4 +347,14 @@ io.on('connection', (socket) => {
 
 httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    
+    // Initialize WhatsApp client after server starts to prevent blocking UI
+    setTimeout(() => {
+        console.log('Initializing WhatsApp Client...');
+        client.initialize().catch(err => {
+            console.error("Initial Initialize Error:", err);
+            clientStatus = 'Error: ' + err.message;
+        });
+    }, 1000);
 });
+
